@@ -17,11 +17,22 @@ mod task;
 use crate::config::MAX_APP_NUM;
 use crate::loader::{get_num_app, init_app_cx};
 use crate::sync::UPSafeCell;
+use crate::syscall::*;
 use lazy_static::*;
 use switch::__switch;
 pub use task::{TaskControlBlock, TaskStatus};
 
 pub use context::TaskContext;
+
+#[derive(Copy, Clone)]
+/// For systrace
+pub struct Trace {
+    write_count: usize,
+    exit_count: usize,
+    yield_count: usize,
+    get_time_count: usize,
+    trace_count: usize,
+}
 
 /// The task manager, where all the tasks are managed.
 ///
@@ -45,6 +56,7 @@ pub struct TaskManagerInner {
     tasks: [TaskControlBlock; MAX_APP_NUM],
     /// id of current `Running` task
     current_task: usize,
+    sys_count: [Trace; MAX_APP_NUM],
 }
 
 lazy_static! {
@@ -59,12 +71,20 @@ lazy_static! {
             task.task_cx = TaskContext::goto_restore(init_app_cx(i));
             task.task_status = TaskStatus::Ready;
         }
+        let sys_count = [Trace {
+            write_count: 0,
+            exit_count: 0,
+            yield_count: 0,
+            get_time_count: 0,
+            trace_count: 0
+        }; MAX_APP_NUM];
         TaskManager {
             num_app,
             inner: unsafe {
                 UPSafeCell::new(TaskManagerInner {
                     tasks,
                     current_task: 0,
+                    sys_count
                 })
             },
         }
@@ -135,6 +155,37 @@ impl TaskManager {
             panic!("All applications completed!");
         }
     }
+
+    /// Update syscall count
+    fn update_count(&self, id: usize) {
+        let mut inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        match id {
+            SYSCALL_WRITE => inner.sys_count[current].write_count += 1,
+            SYSCALL_EXIT => inner.sys_count[current].exit_count += 1,
+            SYSCALL_YIELD => inner.sys_count[current].yield_count += 1,
+            SYSCALL_GET_TIME => inner.sys_count[current].get_time_count += 1,
+            SYSCALL_TRACE => inner.sys_count[current].trace_count += 1,
+            _ => ()
+        }
+        drop(inner);
+    }
+
+    /// Get syscall count
+    fn get_count(&self, id: usize) -> isize {
+        let inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        let result = match id {
+            SYSCALL_WRITE => inner.sys_count[current].write_count as isize,
+            SYSCALL_EXIT => inner.sys_count[current].exit_count as isize,
+            SYSCALL_YIELD => inner.sys_count[current].yield_count as isize,
+            SYSCALL_GET_TIME => inner.sys_count[current].get_time_count as isize,
+            SYSCALL_TRACE => inner.sys_count[current].trace_count as isize,
+            _ => -1
+        };
+        drop(inner);
+        result
+    }
 }
 
 /// Run the first task in task list.
@@ -168,4 +219,14 @@ pub fn suspend_current_and_run_next() {
 pub fn exit_current_and_run_next() {
     mark_current_exited();
     run_next_task();
+}
+
+/// Update sys_count
+pub fn update_count(id: usize) {
+    TASK_MANAGER.update_count(id);
+}
+
+/// Get sys_count
+pub fn get_count(id: usize) -> isize {
+    TASK_MANAGER.get_count(id)
 }
